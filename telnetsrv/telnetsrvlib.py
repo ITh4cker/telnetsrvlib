@@ -23,9 +23,6 @@ Various settings can affect the operation of the server:
 """
 import SocketServer
 import socket
-from gevent import socket
-import gevent.monkey
-gevent.monkey.patch_all()
 import struct
 import sys
 # import traceback
