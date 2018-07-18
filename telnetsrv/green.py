@@ -2,7 +2,6 @@
 # Telnet handler concrete class using green threads
 
 import gevent, gevent.queue
-
 from telnetsrvlib import TelnetHandlerBase, command
 
 class TelnetHandler(TelnetHandlerBase):
@@ -12,32 +11,34 @@ class TelnetHandler(TelnetHandlerBase):
         self.cookedq = gevent.queue.Queue()
         # Call the base class init method
         TelnetHandlerBase.__init__(self, request, client_address, server)
-        
+
     def setup(self):
         '''Called after instantiation'''
         TelnetHandlerBase.setup(self)
         # Spawn a greenlet to handle socket input
         self.greenlet_ic = gevent.spawn(self.inputcooker)
         # Note that inputcooker exits on EOF
-        
+
         # Sleep for 0.5 second to allow options negotiation
         gevent.sleep(0.5)
-        
+
     def finish(self):
         '''Called as the session is ending'''
         TelnetHandlerBase.finish(self)
         # Ensure the greenlet is dead
-        self.greenlet_ic.kill()
-
+        gevent.kill(self.greenlet_ic)
 
     # -- Green input handling functions --
 
     def getc(self, block=True):
         """Return one character from the input queue"""
+        c = ''
         try:
-            return self.cookedq.get(block)
-        except gevent.queue.Empty:
-            return ''
+            c = self.cookedq.get(block, 30)
+            return c
+        except Exception as e:
+            print str(e)
+            return c
 
     def inputcooker_socket_ready(self):
         """Indicate that the socket is ready to be read"""
@@ -50,4 +51,3 @@ class TelnetHandler(TelnetHandlerBase):
                 self.cookedq.put(v)
         else:
             self.cookedq.put(char)
-
