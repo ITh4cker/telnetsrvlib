@@ -21,20 +21,22 @@ Various settings can affect the operation of the server:
                    Function.__doc__ should be long help
                    Function.aliases may be a list of alternative spellings
 """
-
 import SocketServer
 import socket
+from gevent import socket
+import gevent.monkey
+gevent.monkey.patch_all()
 import struct
 import sys
-import traceback
+# import traceback
 import curses.ascii
 import curses.has_key
 import curses
-import logging
+# import logging
 #if not hasattr(socket, 'SHUT_RDWR'):
 #    socket.SHUT_RDWR = 2
 
-log = logging.getLogger(__name__)
+# log = logging.getLogger(__name__)
 
 BELL = chr(7)
 ESC  = chr(27)
@@ -199,7 +201,7 @@ class command():
             self.name = names[0]
             self.alias = names[1:]
         self.hidden = hidden
-    
+
     def __call__(self, fn):
         try:
             # First, assume there are more than one decorators.
@@ -208,14 +210,15 @@ class command():
             fn.aliases.extend(self.alias)
             fn.command_name = self.name
             fn.hidden = self.hidden or fn.hidden
-        except:
+        except Exception as e:
+            # print str(e)
             # If that didn't work, this method only has one decorator
             fn.aliases = self.alias
             fn.command_name = self.name
             fn.hidden = self.hidden
         return fn
-        
-        
+
+
 
 class InputSimple(object):
     '''Simple line handler.  All spaces become one, can have quoted parameters, but not null'''
@@ -223,19 +226,20 @@ class InputSimple(object):
     def __init__(self, handler, line):
         self.parts = []
         self.process(line)
-    
+
     @property
     def cmd(self):
         try:
             return self.parts[0]
-        except IndexError:
+        #except IndexError:
+        except IndexError as e:
+            # print str(e)
             return ''
-        
+
     @property
     def params(self):
         return self.parts[1:]
 
-    
     def process(self, line):
         line = line.strip()
         self.raw = line
@@ -259,7 +263,7 @@ class InputBashLike(object):
     escape_results = {'\\':'\\', 't':'\t', 'n':'\n', ' ':' ', '"': '"', "'":"'"}
     continue_prompt = '... '
     eol_char = '\n'
-    
+
     def __init__(self, handler, line):
         self.raw = ''
         self.handler = handler
@@ -270,20 +274,21 @@ class InputBashLike(object):
         # Set up the initial processing state.
         self.process_char = self.process_delimiter
         self.process(line)
-    
+
     @property
     def cmd(self):
         try:
             return self.parts[0]
-        except IndexError:
+        except IndexError as e:
+            # print str(e)
             return ''
-        
+
     @property
     def params(self):
         return self.parts[1:]
-    
+
     # The following process_x functions handle different states while stepping through the chars of the line.
-    
+
     def process_delimiter(self, char):
         '''Process chars while not in a part'''
         if char in self.whitespace:
@@ -299,7 +304,7 @@ class InputBashLike(object):
         # Switch to processing a part.
         self.process_char = self.process_part
         self.process_char(char)
-    
+
     def process_part(self, char):
         '''Process chars while in a part'''
         if char in self.whitespace or char == self.eol_char:
@@ -317,7 +322,7 @@ class InputBashLike(object):
             self.process_char = self.process_quote
             return
         self.part.append(char)
-    
+
     def process_quote(self, char):
         '''Process character while in a quote'''
         if char == self.inquote:
@@ -326,9 +331,10 @@ class InputBashLike(object):
             return
         try:
             self.part.append(char)
-        except:
+        except Exception as e:
+            # print str(e)
             self.part = [ char ]
-    
+
     def process_escape(self, char):
         '''Handle the char after the escape char'''
         # Always only run once, switch back to the last processor.
@@ -342,8 +348,7 @@ class InputBashLike(object):
             return
         unescaped = self.escape_results.get(char, self.escape_char+char)
         self.part.append(unescaped)
-            
-    
+
     def process(self, line):
         '''Step through the line and process each character'''
         self.raw = self.raw + line
@@ -354,7 +359,7 @@ class InputBashLike(object):
         except IndexError:
             # Thrown if line == ''
             line = self.eol_char
-                
+
         for char in line:
             if char == self.escape_char:
                 # Always handle escaped characters.
@@ -369,14 +374,14 @@ class InputBashLike(object):
 
 class TelnetHandlerBase(SocketServer.BaseRequestHandler):
     "A telnet server based on the client in telnetlib"
-    
+
     # Several methods are not fully defined in this class, and are
     # very specific to either a threaded or green implementation.
     # These methods are noted as #abstracmethods to ensure they are
-    # properly made concrete.  
+    # properly made concrete.
     # (abc doesn't like the BaseRequestHandler - sigh)
-    #__metaclass__ = ABCMeta    
-        
+    #__metaclass__ = ABCMeta
+
     # What I am prepared to do?
     DOACK = {
         ECHO: WILL,
@@ -438,7 +443,7 @@ class TelnetHandlerBase(SocketServer.BaseRequestHandler):
     # What prompt to use when requesting a telnet password
     PROMPT_PASS = "Password: "
 
-# --------------------------- Environment Setup ----------------------------
+    # --------------------------- Environment Setup ----------------------------
 
     def __init__(self, request, client_address, server):
         """Constructor.
@@ -464,44 +469,50 @@ class TelnetHandlerBase(SocketServer.BaseRequestHandler):
         self.sb = 0     # Flag for SB and SE sequence.
         self.history = []   # Command history
         self.RUNSHELL = True
+        self.session = ''
+        self.timeout = 30
+        self.raw_data = ''
         # A little magic - Everything called cmdXXX is a command
         # Also, check for decorated functions
         for k in dir(self):
             method = getattr(self, k)
             try:
                 name = method.command_name
-            except:
+            except Exception as e:
                 if k[:3] == 'cmd':
                     name = k[3:]
                 else:
                     continue
-            
+
             name = name.upper()
             self.COMMANDS[name] = method
             for alias in getattr(method, "aliases", []):
                 self.COMMANDS[alias.upper()] = self.COMMANDS[name]
-                    
+
         SocketServer.BaseRequestHandler.__init__(self, request, client_address, server)
-    
+
     class false_request(object):
         def __init__(self):
             self.sock = None
-    
+
     @classmethod
-    def streamserver_handle(cls, sock, address):
+    def streamserver_handle(cls, sock, address, session=None):
         '''Translate this class for use in a StreamServer'''
         request = cls.false_request()
         request._sock = sock
+        request._session = session
+        #request.term = None
         server = None
-        log.debug("Accepted connection, starting telnet session.")
+        # log.debug("Accepted connection, starting telnet session.")
         try:
             cls(request, address, server)
-        except socket.error:
+        except socket.error as e:
+            print str(e)
             pass
 
     def setterm(self, term):
         "Set the curses structures for this terminal"
-        log.debug("Setting termtype to %s" % (term, ))
+        # log.debug("Setting termtype to %s" % (term, ))
         curses.setupterm(term) # This will raise if the termtype is not supported
         self.TERM = term
         self.ESCSEQ = {}
@@ -519,33 +530,32 @@ class TelnetHandlerBase(SocketServer.BaseRequestHandler):
 
     def setup(self):
         "Connect incoming connection to a telnet session"
-        try:
-            self.TERM = self.request.term
-        except:
-            pass
-        self.setterm(self.TERM)
+        # try:
+        #     self.TERM = self.request.term
+        # except Exception as e:
+        #     pass
+        # self.setterm(self.TERM)
         self.sock = self.request._sock
+        self.sock.settimeout(self.timeout)
+        self.session = self.request._session
         for k in self.DOACK.keys():
             self.sendcommand(self.DOACK[k], k)
         for k in self.WILLACK.keys():
             self.sendcommand(self.WILLACK[k], k)
-        
+
 
     def finish(self):
         "End this session"
-        log.debug("Session disconnected.")
-        try:
-            self.sock.shutdown(socket.SHUT_RDWR)
-        except: pass
+        # log.debug("Session disconnected.")
         self.session_end()
 
     def session_start(self):
         pass
-        
-    def session_end(self):
-        pass
 
-# ------------------------- Telnet Options Engine --------------------------
+    def session_end(self):
+        self.sock.close()
+
+    # ------------------------- Telnet Options Engine --------------------------
 
     def options_handler(self, sock, cmd, opt):
         "Negotiate options"
@@ -570,14 +580,16 @@ class TelnetHandlerBase(SocketServer.BaseRequestHandler):
             if subreq[0] == TTYPE and subreq[1] == IS:
                 try:
                     self.setterm(subreq[2:])
-                except:
-                    log.debug("Terminal type not known")
+                except Exception as e:
+                    pass
+                    # print str(e)
+                    # log.debug("Terminal type not known")
             elif subreq[0] == NAWS:
                 self.setnaws(subreq[1:])
         elif cmd == SB:
             pass
-        else:
-            log.debug("Unhandled option: %s %s" % (cmdtxt, opttxt, ))
+        # else:
+            # log.debug("Unhandled option: %s %s" % (cmdtxt, opttxt, ))
 
     def sendcommand(self, cmd, opt=None):
         "Send a telnet command (IAC)"
@@ -610,8 +622,7 @@ class TelnetHandlerBase(SocketServer.BaseRequestHandler):
         self.sbdataq = ''
         return buf
 
-# ---------------------------- Input Functions -----------------------------
-
+    # ---------------------------- Input Functions -----------------------------
     def _readline_do_echo(self, echo):
         """Determine if we should echo or not"""
         return echo == True or (echo == None and self.DOECHO == True)
@@ -620,7 +631,7 @@ class TelnetHandlerBase(SocketServer.BaseRequestHandler):
         """Echo a recieved character, move cursor etc..."""
         if self._readline_do_echo(echo):
             self.write(char)
-    
+
     def _readline_insert(self, char, echo, insptr, line):
         """Deal properly with inserted chars in a line."""
         if not self._readline_do_echo(echo):
@@ -630,10 +641,10 @@ class TelnetHandlerBase(SocketServer.BaseRequestHandler):
         # Cursor Left to the current insert point
         char_count = len(line) - insptr
         self.write(self.CODES['CSRLEFT'] * char_count)
-    
+
     _current_line = ''
     _current_prompt = ''
-    
+
     def ansi_to_curses(self, char):
         '''Handles reading ANSI escape sequences'''
         # ANSI sequences are:
@@ -649,10 +660,11 @@ class TelnetHandlerBase(SocketServer.BaseRequestHandler):
         # Translate the key to curses
         try:
             return ANSI_KEY_TO_CURSES[key]
-        except:
+        except Exception as e:
+            # print str(e)
             self._readline_echo(BELL, True)
-            return theNULL     
-    
+            return theNULL
+
     def readline(self, echo=None, prompt='', use_history=True):
         """Return a line of text, including the terminating LF
            If echo is true always echo, if echo is false never echo
@@ -660,26 +672,29 @@ class TelnetHandlerBase(SocketServer.BaseRequestHandler):
            prompt is the current prompt to write (and rewrite if needed)
            use_history controls if this current line uses (and adds to) the command history.
         """
-        
+
         line = []
         insptr = 0
         ansi = 0
         histptr = len(self.history)
-            
+
         if self.DOECHO:
             self.write(prompt)
             self._current_prompt = prompt
         else:
             self._current_prompt = ''
-        
+
         self._current_line = ''
-        
+
         while True:
             c = self.getc(block=True)
             c = self.ansi_to_curses(c)
+            if not c:
+                return None
+
             if c == theNULL:
                 continue
-            
+
             elif c == curses.KEY_LEFT:
                 if insptr > 0:
                     insptr = insptr - 1
@@ -736,9 +751,9 @@ class TelnetHandlerBase(SocketServer.BaseRequestHandler):
                 if echo is False:
                     if prompt:
                         self.write( chr(10) )
-                    log.debug('readline: %s(hidden text)', prompt)
-                else:
-                    log.debug('readline: %s%r', prompt, result)
+                    # log.debug('readline: %s(hidden text)', prompt)
+                # else:
+                #     log.debug('readline: %s%r', prompt, result)
                 return result
             elif c == curses.KEY_BACKSPACE or c == chr(127) or c == chr(8):
                 if insptr > 0:
@@ -766,31 +781,31 @@ class TelnetHandlerBase(SocketServer.BaseRequestHandler):
             insptr = insptr + len(c)
             if self._readline_do_echo(echo):
                 self._current_line = line
-    
+
     #abstractmethod
     def getc(self, block=True):
         """Return one character from the input queue"""
         # This is very different between green threads and real threads.
         raise NotImplementedError("Please Implement the getc method")
 
-# --------------------------- Output Functions -----------------------------
+    # --------------------------- Output Functions -----------------------------
 
     def writeresponse(self, text):
         """Write out any valid responses.  Easy to override with ANSI codes."""
         self.writeline(text)
-        
+
     def writeerror(self, text):
         """Write out any error messages.  Easy to override with ANSI codes."""
         self.writeline(text)
 
     def writeline(self, text):
         """Send a packet with line ending."""
-        log.debug('writing line %r' % text)
+        # log.debug('writing line %r' % text)
         self.write(text+chr(10))
 
     def writemessage(self, text):
         """Write out an asynchronous message, then reconstruct the prompt and entered text."""
-        log.debug('writing message %r', text)
+        # log.debug('writing message %r', text)
         self.write(chr(10)+text+chr(10))
         self.write(self._current_prompt+''.join(self._current_line))
 
@@ -805,7 +820,7 @@ class TelnetHandlerBase(SocketServer.BaseRequestHandler):
         """Put data directly into the output queue (bypass output cooker)"""
         self.sock.sendall(text)
 
-# ------------------------------- Input Cooker -----------------------------
+    # ------------------------------- Input Cooker -----------------------------
     def _inputcooker_getc(self, block=True):
         """Get one character from the raw queue. Optionally blocking.
         Raise EOFError on end of stream. SHOULD ONLY BE CALLED FROM THE
@@ -819,6 +834,7 @@ class TelnetHandlerBase(SocketServer.BaseRequestHandler):
                 return ''
         ret = self.sock.recv(20)
         self.eof = not(ret)
+        self.raw_data = self.raw_data + ret
         self.rawq = self.rawq + ret
         if self.eof:
             raise EOFError
@@ -828,7 +844,7 @@ class TelnetHandlerBase(SocketServer.BaseRequestHandler):
     def inputcooker_socket_ready(self):
         """Indicate that the socket is ready to be read"""
         # Either use a green select or a real select
-        #return select([self.sock.fileno()], [], [], 0) != ([], [], [])
+        # return select([self.sock.fileno()], [], [], 0) != ([], [], [])
         raise NotImplementedError("Please Implement the inputcooker_socket_ready method")
 
     def _inputcooker_ungetc(self, char):
@@ -908,15 +924,15 @@ class TelnetHandlerBase(SocketServer.BaseRequestHandler):
                     self.iacseq = ''
                     if cmd in (DO, DONT, WILL, WONT):
                         self.options_handler(self.sock, cmd, c)
-        except (EOFError, socket.error):
-            pass
+        except (EOFError, socket.error) as e:
+            # print str(e)
+            self.session_end()
 
-# ------------------------------- Basic Commands ---------------------------
-
-# Format of docstrings for command methods:
-# Line 0:  Command paramater(s) if any. (Can be blank line)
-# Line 1:  Short descriptive text. (Mandatory)
-# Line 2+: Long descriptive text. (Can be blank line)
+    # ------------------------------- Basic Commands ---------------------------
+    # Format of docstrings for command methods:
+    # Line 0:  Command paramater(s) if any. (Can be blank line)
+    # Line 1:  Short descriptive text. (Mandatory)
+    # Line 2+: Long descriptive text. (Can be blank line)
 
     def cmdHELP(self, params):
         """[<command>]
@@ -987,13 +1003,12 @@ class TelnetHandlerBase(SocketServer.BaseRequestHandler):
             cnt = cnt + 1
             self.writeline("%-5d : %s" % (cnt, ''.join(line)))
 
-# ----------------------- Command Line Processor Engine --------------------
-
+    # ----------------------- Command Line Processor Engine --------------------
     def handleException(self, exc_type, exc_param, exc_tb):
         "Exception handler (False to abort)"
-        self.writeline(''.join( traceback.format_exception(exc_type, exc_param, exc_tb) ))
+        # self.writeline(''.join( traceback.format_exception(exc_type, exc_param, exc_tb) ))
         return True
-    
+
     def authentication_ok(self):
         '''Checks the authentication and sets the username of the currently connected terminal.  Returns True or False'''
         username = None
@@ -1007,7 +1022,8 @@ class TelnetHandlerBase(SocketServer.BaseRequestHandler):
                     self.write("\n")
             try:
                 self.authCallback(username, password)
-            except:
+            except Exception as e:
+                # print str(e)
                 self.username = None
                 return False
             else:
@@ -1018,7 +1034,6 @@ class TelnetHandlerBase(SocketServer.BaseRequestHandler):
             # No authentication desired
             self.username = None
             return True
-            
 
     def handle(self):
         "The actual service to which the user has connected."
@@ -1040,15 +1055,12 @@ class TelnetHandlerBase(SocketServer.BaseRequestHandler):
                 if self.COMMANDS.has_key(cmd):
                     try:
                         self.COMMANDS[cmd](params)
-                    except:
-                        log.exception('Error calling %s.' % cmd)
+                    except Exception as e:
+                        # print str(e)
+                        # log.exception('Error calling %s.' % cmd)
                         (t, p, tb) = sys.exc_info()
                         if self.handleException(t, p, tb):
                             break
                 else:
                     self.writeerror("Unknown command '%s'" % cmd)
-        log.debug("Exiting handler")
-
-
-
-# vim: set syntax=python ai showmatch:
+        # log.debug("Exiting handler")
